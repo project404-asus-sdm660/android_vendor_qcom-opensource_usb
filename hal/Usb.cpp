@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2019-2021, The Linux Foundation. All rights reserved.
  * Not a Contribution.
  *
  * Copyright (C) 2017 The Android Open Source Project
@@ -52,8 +52,9 @@ const char GOOGLE_USBC_35_ADAPTER_UNPLUGGED_ID_STR[] = "5029";
 // Set by the signal handler to destroy the thread
 volatile bool destroyThread;
 
+static void checkUsbWakeupSupport(struct Usb *usb);
 static void checkUsbDeviceAutoSuspend(const std::string& devicePath);
-static void checkUsbInterfaceAutoSuspend(const std::string& devicePath,
+static bool checkUsbInterfaceAutoSuspend(const std::string& devicePath,
         const std::string &intf);
 
 static int32_t readFile(const std::string &filename, std::string *contents) {
@@ -431,7 +432,7 @@ bool canSwitchRoleHelper(const std::string &portName, PortRoleType /*type*/) {
  * object if required.
  */
 Status getPortStatusHelper(hidl_vec<PortStatus> *currentPortStatus_1_2,
-    bool V1_0) {
+    bool V1_0, struct Usb *usb) {
   std::unordered_map<std::string, bool> names;
   Status result = getTypeCPortNamesHelper(&names);
   int i = -1;
@@ -506,8 +507,8 @@ Status getPortStatusHelper(hidl_vec<PortStatus> *currentPortStatus_1_2,
 
         std::string contaminantPresence;
 
-        if (!readFile("/sys/class/power_supply/usb/moisture_detected", &contaminantPresence) ||
-            !readFile("/sys/class/qcom-battery/moisture_detection_status", &contaminantPresence)) {
+        if (!usb->mContaminantStatusPath.empty() &&
+                                !readFile(usb->mContaminantStatusPath, &contaminantPresence)) {
           if (contaminantPresence == "1") {
             (*currentPortStatus_1_2)[i].contaminantDetectionStatus =
                 ContaminantDetectionStatus::DETECTED;
@@ -544,15 +545,15 @@ Return<void> Usb::queryPortStatus() {
   if (mCallback_1_0 != NULL) {
     if (callback_V1_1 != NULL) { // 1.1 or 1.2
       if (callback_V1_2 == NULL) { // 1.1 only
-        status = getPortStatusHelper(&currentPortStatus_1_2, false);
+        status = getPortStatusHelper(&currentPortStatus_1_2, false, this);
         currentPortStatus_1_1.resize(currentPortStatus_1_2.size());
         for (unsigned long i = 0; i < currentPortStatus_1_2.size(); i++)
           currentPortStatus_1_1[i].status = currentPortStatus_1_2[i].status_1_1.status;
       }
       else  //1.2 only
-        status = getPortStatusHelper(&currentPortStatus_1_2, false);
+        status = getPortStatusHelper(&currentPortStatus_1_2, false, this);
     } else { // 1.0 only
-      status = getPortStatusHelper(&currentPortStatus_1_2, true);
+      status = getPortStatusHelper(&currentPortStatus_1_2, true, this);
       currentPortStatus.resize(currentPortStatus_1_2.size());
       for (unsigned long i = 0; i < currentPortStatus_1_2.size(); i++)
         currentPortStatus[i] = currentPortStatus_1_2[i].status_1_1.status;
@@ -588,7 +589,7 @@ Return<void> callbackNotifyPortStatusChangeHelper(struct Usb *usb) {
   sp<IUsbCallback> callback_V1_2 = IUsbCallback::castFrom(usb->mCallback_1_0);
 
   pthread_mutex_lock(&usb->mLock);
-  status = getPortStatusHelper(&currentPortStatus_1_2, false);
+  status = getPortStatusHelper(&currentPortStatus_1_2, false, usb);
   ret = callback_V1_2->notifyPortStatusChange_1_2(currentPortStatus_1_2, status);
 
   if (!ret.isOk())
@@ -694,9 +695,9 @@ static void uevent_event(uint32_t /*epevents*/, struct data *payload) {
         std::csub_match submatch = match[1];
         checkUsbDeviceAutoSuspend("/sys" +  submatch.str());
       }
-    } else if (std::regex_match(cp, match,
+    } else if (!payload->usb->mIgnoreWakeup && std::regex_match(cp, match,
           std::regex("bind@(/devices/platform/soc/.*dwc3/xhci-hcd\\.\\d\\.auto/"
-                     "usb\\d/\\d-\\d(?:/[\\d\\.-]+)*)(/[^/]*:[^/]*)"))) {
+                     "usb\\d/\\d-\\d(?:/[\\d\\.-]+)*)/([^/]*:[^/]*)"))) {
       if (match.size() == 3) {
         std::csub_match devpath = match[1];
         std::csub_match intfpath = match[2];
@@ -706,7 +707,8 @@ static void uevent_event(uint32_t /*epevents*/, struct data *payload) {
                strlen("POWER_SUPPLY_NAME=usb"))) {
         std::string contaminantPresence;
 
-        if (!readFile("/sys/class/qcom-battery/moisture_detection_status", &contaminantPresence)) {
+        if (!payload->usb->mContaminantStatusPath.empty() &&
+                          !readFile(payload->usb->mContaminantStatusPath, &contaminantPresence)) {
           if ((contaminantPresence == "1" && payload->usb->mContaminantPresence == false)
               || (contaminantPresence == "0" && payload->usb->mContaminantPresence == true)){
 
@@ -714,7 +716,7 @@ static void uevent_event(uint32_t /*epevents*/, struct data *payload) {
             else payload->usb->mContaminantPresence = false;
 
             if (callback_V1_2 != NULL) {
-              Status status = getPortStatusHelper(&currentPortStatus_1_2, false);
+              Status status = getPortStatusHelper(&currentPortStatus_1_2, false, payload->usb);
               ret = callback_V1_2->notifyPortStatusChange_1_2(
                   currentPortStatus_1_2, status);
               if (!ret.isOk()) ALOGE("error %s", ret.description().c_str());
@@ -739,7 +741,7 @@ static void uevent_event(uint32_t /*epevents*/, struct data *payload) {
         payload->usb->mContaminantPresence = bContaminantPresence;
 
         if (callback_V1_2 != NULL) {
-          Status status = getPortStatusHelper(&currentPortStatus_1_2, false);
+          Status status = getPortStatusHelper(&currentPortStatus_1_2, false, payload->usb);
           ret = callback_V1_2->notifyPortStatusChange_1_2(
               currentPortStatus_1_2, status);
           if (!ret.isOk()) ALOGE("error %s", ret.description().c_str());
@@ -876,35 +878,97 @@ Return<void> Usb::setCallback(const sp<V1_0::IUsbCallback> &callback) {
 
   pthread_mutex_unlock(&mLock);
 
-  // Scan for enumerated USB audio devices and enable autosuspend
-  std::string usbaudio = "/sys/bus/usb/drivers/snd-usb-audio/";
-  DIR *dp = opendir(usbaudio.c_str());
+  checkUsbWakeupSupport(this);
+
+  /*
+   * Check for the correct path to detect contaminant presence status
+   * from the possible paths and use that to get contaminant
+   * presence status when required.
+   */
+  if (access("/sys/class/power_supply/usb/moisture_detected", R_OK) == 0) {
+    mContaminantStatusPath = "/sys/class/power_supply/usb/moisture_detected";
+  } else if (access("/sys/class/qcom-battery/moisture_detection_status", R_OK) == 0) {
+    mContaminantStatusPath = "/sys/class/qcom-battery/moisture_detection_status";
+  } else if (access("/sys/bus/iio/devices/iio:device4/in_index_usb_moisture_detected_input", R_OK) == 0) {
+    mContaminantStatusPath = "/sys/bus/iio/devices/iio:device4/in_index_usb_moisture_detected_input";
+  } else {
+    mContaminantStatusPath.clear();
+  }
+
+  ALOGI("Contamination presence path: %s", mContaminantStatusPath.c_str());
+
+  return Void();
+}
+
+static void checkUsbWakeupSupport(struct Usb *usb) {
+  std::string platdevices = "/sys/bus/platform/devices/";
+  DIR *pd = opendir(platdevices.c_str());
+  if (pd != NULL) {
+    struct dirent *platDir;
+    while ((platDir = readdir(pd))) {
+      std::string cname = platDir->d_name;
+      /*
+       * Scan for USB controller. Here "susb" takes care of both hsusb and ssusb.
+       * Set mIgnoreWakeup based on the availability of 1st Controller's
+       * power/wakeup node.
+       */
+      if (strstr(platDir->d_name, "susb")) {
+	if (faccessat(dirfd(pd), (cname + "/power/wakeup").c_str(), F_OK, 0) < 0) {
+	  usb->mIgnoreWakeup = true;
+	  ALOGI("PLATFORM DOESN'T SUPPORT WAKEUP");
+	} else {
+	  usb->mIgnoreWakeup = false;
+	}
+	break;
+      }
+    }
+    closedir(pd);
+  }
+
+  if (usb->mIgnoreWakeup)
+    return;
+
+  /*
+   * If wakeup is supported then scan for enumerated USB devices and
+   * enable autosuspend.
+   */
+  std::string usbdevices = "/sys/bus/usb/devices/";
+  DIR *dp = opendir(usbdevices.c_str());
   if (dp != NULL) {
-    struct dirent *ep;
-    std::string parent;
+    struct dirent *deviceDir;
+    struct dirent *intfDir;
+    DIR *ip;
 
-    while ((ep = readdir(dp))) {
-      if (ep->d_type == DT_LNK && isdigit(ep->d_name[0])) {
+    while ((deviceDir = readdir(dp))) {
+      /*
+       * Iterate over all the devices connected over USB while skipping
+       * the interfaces.
+       */
+      if (deviceDir->d_type == DT_LNK && !strchr(deviceDir->d_name, ':')) {
         char buf[PATH_MAX];
-        if (realpath((usbaudio + ep->d_name).c_str(), buf)) {
-          char *p = strrchr(buf, '/');
-          if (p)
-            *p = '\0';
+        if (realpath((usbdevices + deviceDir->d_name).c_str(), buf)) {
 
-          if (parent == buf)
+          ip = opendir(buf);
+          if (ip == NULL)
             continue;
 
-          ALOGI("auto suspend usb device %s", buf);
-          parent = buf;
-          writeFile(parent + "/power/control", "auto");
-          writeFile(parent + "/power/wakeup", "enabled");
+          while ((intfDir = readdir(ip))) {
+            // Scan over all the interfaces that are part of the device
+            if (intfDir->d_type == DT_DIR && strchr(intfDir->d_name, ':')) {
+              /*
+               * If the autosuspend is successfully enabled, no need
+               * to iterate over other interfaces.
+               */
+              if (checkUsbInterfaceAutoSuspend(buf, intfDir->d_name))
+                break;
+            }
+          }
+          closedir(ip);
         }
       }
     }
     closedir(dp);
   }
-
-  return Void();
 }
 
 /*
@@ -946,12 +1010,12 @@ static void checkUsbDeviceAutoSuspend(const std::string& devicePath) {
   }
 }
 
-static void checkUsbInterfaceAutoSuspend(const std::string& devicePath,
+static bool checkUsbInterfaceAutoSuspend(const std::string& devicePath,
         const std::string &intf) {
   std::string bInterfaceClass;
-  int interfaceClass;
+  int interfaceClass, ret = -1;
 
-  readFile(devicePath + intf + "/bInterfaceClass", &bInterfaceClass);
+  readFile(devicePath + "/" + intf + "/bInterfaceClass", &bInterfaceClass);
   interfaceClass = std::stoi(bInterfaceClass, 0, 16);
 
   // allow autosuspend for certain class devices
@@ -959,13 +1023,18 @@ static void checkUsbInterfaceAutoSuspend(const std::string& devicePath,
     case USB_CLASS_AUDIO:
     case USB_CLASS_HUB:
       ALOGI("auto suspend usb interfaces %s", devicePath.c_str());
-      writeFile(devicePath + "/power/control", "auto");
-      writeFile(devicePath + "/power/wakeup", "enabled");
+      ret = writeFile(devicePath + "/power/control", "auto");
+      if (ret)
+        break;
+
+      ret = writeFile(devicePath + "/power/wakeup", "enabled");
       break;
      default:
       ALOGI("usb interface does not support autosuspend %s", devicePath.c_str());
 
   }
+
+  return ret ? false : true;
 }
 
 }  // namespace implementation
