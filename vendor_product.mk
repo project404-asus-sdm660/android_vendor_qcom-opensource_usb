@@ -1,11 +1,11 @@
 # USB init scripts
-PRODUCT_PACKAGES += init.qcom.usb.rc init.qcom.usb.sh
+#PRODUCT_PACKAGES += init.qcom.usb.rc init.qcom.usb.sh
 
 # additional debugging on userdebug/eng builds
-ifneq (,$(filter userdebug eng, $(TARGET_BUILD_VARIANT)))
-  PRODUCT_PACKAGES += init.qti.usb.debug.sh
-  PRODUCT_PACKAGES += init.qti.usb.debug.rc
-endif
+#ifneq (,$(filter userdebug eng, $(TARGET_BUILD_VARIANT)))
+#  PRODUCT_PACKAGES += init.qti.usb.debug.sh
+#  PRODUCT_PACKAGES += init.qti.usb.debug.rc
+#endif
 
 ifeq ($(TARGET_HAS_DIAG_ROUTER),true)
   PRODUCT_PROPERTY_OVERRIDES += vendor.usb.diag.func.name=ffs
