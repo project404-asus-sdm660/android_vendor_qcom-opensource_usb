@@ -20,7 +20,7 @@ else
   PRODUCT_PROPERTY_OVERRIDES += vendor.usb.use_ffs_mtp=0
 endif
 
-ifneq ($(TARGET_KERNEL_VERSION),$(filter $(TARGET_KERNEL_VERSION),4.9 4.14))
+ifneq ($(TARGET_KERNEL_VERSION),$(filter $(TARGET_KERNEL_VERSION),4.9 4.14 4.19))
   PRODUCT_PACKAGES += android.hardware.usb@1.2-service-qti
 endif
 
